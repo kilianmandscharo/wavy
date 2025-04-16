@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::File;
 
-use chunk::read_format;
+use chunk::{read_format, read_frames_u16, SampleType};
 
 mod chunk;
 
@@ -10,7 +10,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let format = read_format(&mut f)?;
 
-    println!("{:?}", format);
+    match format.sample_type {
+        SampleType::U16 => {
+            let samples = read_frames_u16(&mut f)?;
+            println!("samples length: {}", samples.len());
+        }
+    }
 
     Ok(())
 }

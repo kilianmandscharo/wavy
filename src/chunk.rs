@@ -54,7 +54,7 @@ pub struct FormatChunk {
 pub struct DataChunk {
     name: String,
     chunk_size: u32,
-    samples: Vec<u16>,
+    samples: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -130,16 +130,10 @@ fn read_data_chunk(
     let mut buf = vec![0_u8; chunk_size as usize];
     file.read_exact(&mut buf[..])?;
 
-    // FIXME: Very inefficient...and presupposes a sample_size_in_bits of 16
-    let samples = buf
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-
     Ok(Chunk::Data(DataChunk {
         name: chunk_id,
         chunk_size,
-        samples,
+        samples: buf,
     }))
 }
 
@@ -221,7 +215,7 @@ pub struct Format {
     file_size: u32,
     file_type: FileType,
     file_format: FileFormat,
-    sample_type: SampleType,
+    pub sample_type: SampleType,
     chans: u16,
     sample_rate: u32,
     bytes_per_sec: u32,       // without compression: sample_rate * frame_size
@@ -260,6 +254,30 @@ pub fn read_format(file: &mut File) -> Result<Format, Box<dyn Error>> {
     }
 }
 
-pub fn read_frames_u16(file: &mut File) -> Result<(), Box<dyn Error>> {
-    Ok(())
+pub fn read_frames_u16(file: &mut File) -> Result<Vec<u16>, Box<dyn Error>> {
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut data_chunk: Option<DataChunk> = None;
+    while let Some(chunk) = read_next_chunk(file)? {
+        match chunk {
+            Chunk::Data(d_chunk) => {
+                data_chunk = Some(d_chunk);
+                break;
+            }
+            chunk => println!("skipping chunk: {}", chunk.get_name()),
+        }
+    }
+
+    match data_chunk {
+        Some(chunk) => {
+            // FIXME: Is there a better way?
+            let samples = chunk
+                .samples
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            Ok(samples)
+        }
+        None => panic!("no data chunk found"),
+    }
 }
