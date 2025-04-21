@@ -1,7 +1,7 @@
 use core::str;
 use std::error::Error;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 #[derive(Debug)]
 pub enum Chunk {
@@ -223,7 +223,7 @@ pub struct Format {
     sample_size_in_bits: u16,
 }
 
-pub fn read_format(file: &mut File) -> Result<Format, Box<dyn Error>> {
+pub fn open_file_read(file: &mut File) -> Result<Format, Box<dyn Error>> {
     if let Some(Chunk::Riff(riff_chunk)) = read_next_chunk(file)? {
         let mut format_chunk: Option<FormatChunk> = None;
         while let Some(chunk) = read_next_chunk(file)? {
@@ -252,6 +252,79 @@ pub fn read_format(file: &mut File) -> Result<Format, Box<dyn Error>> {
     } else {
         panic!("no riff chunk found")
     }
+}
+
+#[derive(Debug)]
+pub struct FormatCreate {
+    pub file_type: FileType,
+    pub file_format: FileFormat,
+    pub sample_type: SampleType,
+    pub chans: u16,
+    pub sample_rate: u32,
+}
+
+pub fn create_file_u16(
+    path: &str,
+    format: &FormatCreate,
+    data: &[u16],
+) -> Result<File, Box<dyn Error>> {
+    let mut f = File::create(path)?;
+
+    let mut format_buf: [u8; 24] = [0; 24];
+
+    let format_buf_chunk_id = b"fmt ";
+    let format_buf_chunk_size: u32 = 16;
+    format_buf[..4].copy_from_slice(format_buf_chunk_id);
+    format_buf[4..8].copy_from_slice(&format_buf_chunk_size.to_le_bytes());
+
+    // only PCM supported for now
+    let format_tag: u16 = 0x0001;
+    format_buf[8..10].copy_from_slice(&format_tag.to_le_bytes());
+
+    format_buf[10..12].copy_from_slice(&format.chans.to_le_bytes());
+    format_buf[12..16].copy_from_slice(&format.sample_rate.to_le_bytes());
+
+    // only u16 supported for now
+    let bits_per_sample = 16;
+    let frame_size: u16 = format.chans * ((bits_per_sample + 7) / 8);
+    let bytes_per_sec: u32 = format.sample_rate * frame_size as u32;
+
+    format_buf[16..20].copy_from_slice(&bytes_per_sec.to_le_bytes());
+    format_buf[20..22].copy_from_slice(&frame_size.to_le_bytes());
+    format_buf[22..24].copy_from_slice(&bits_per_sample.to_le_bytes());
+
+    let mut data_header_buf: [u8; 8] = [0; 8];
+    let data_buf_chunk_id = b"data";
+    let data_buf_chunk_size: u32 = (data.len() * 2) as u32;
+    data_header_buf[0..4].copy_from_slice(data_buf_chunk_id);
+    data_header_buf[4..8].copy_from_slice(&data_buf_chunk_size.to_le_bytes());
+
+    let mut data_body_buf: Vec<u8> = Vec::with_capacity(data_buf_chunk_size as usize);
+    for &value in data {
+        data_body_buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    let riff_buf_chunk_id = b"RIFF";
+    let riff_buf_chunk_size: u32 = 36;
+    let riff_buf_type = b"WAVE";
+    let mut riff_buf: [u8; 12] = [0; 12];
+    riff_buf[0..4].copy_from_slice(riff_buf_chunk_id);
+    riff_buf[4..8].copy_from_slice(&riff_buf_chunk_size.to_le_bytes());
+    riff_buf[8..12].copy_from_slice(riff_buf_type);
+
+    let n = f.write(&riff_buf)?;
+    assert_eq!(12, n);
+
+    let n = f.write(&format_buf)?;
+    assert_eq!(24, n);
+
+    let n = f.write(&data_header_buf)?;
+    assert_eq!(8, n);
+
+    let n = f.write(&data_body_buf)?;
+    assert_eq!(data_buf_chunk_size as usize, n);
+
+    Ok(f)
 }
 
 pub fn read_frames_u16(file: &mut File) -> Result<Vec<u16>, Box<dyn Error>> {
