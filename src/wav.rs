@@ -58,6 +58,16 @@ impl WaveFile {
                             - 1.0
                     })
                     .collect(),
+                SampleType::U32 => d_chunk
+                    .samples
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        (u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32
+                            / u32::MAX as f32)
+                            * 2.0
+                            - 1.0
+                    })
+                    .collect(),
             },
             None => {
                 return Err(anyhow!("no data chunk found"));
@@ -101,12 +111,18 @@ impl WaveFile {
 
         let mut data_body_buf: Vec<u8> = Vec::with_capacity(data_buf_chunk_size as usize);
         for &value in data {
-            let transformed = match format.sample_type {
+            match format.sample_type {
                 SampleType::U16 => {
-                    ((value.clamp(-1.0, 1.0) + 1.0) * 0.5 * u16::MAX as f32).round() as u16
+                    let transformed =
+                        ((value.clamp(-1.0, 1.0) + 1.0) * 0.5 * u16::MAX as f32).round() as u16;
+                    data_body_buf.extend_from_slice(&transformed.to_le_bytes());
+                }
+                SampleType::U32 => {
+                    let transformed =
+                        ((value.clamp(-1.0, 1.0) + 1.0) * 0.5 * u32::MAX as f32).round() as u32;
+                    data_body_buf.extend_from_slice(&transformed.to_le_bytes());
                 }
             };
-            data_body_buf.extend_from_slice(&transformed.to_le_bytes());
         }
 
         let riff_buf_chunk_id = b"RIFF";
@@ -157,6 +173,7 @@ pub enum FileType {
 #[derive(Debug, Clone, Copy)]
 pub enum SampleType {
     U16,
+    U32,
 }
 
 #[derive(Debug)]
@@ -368,5 +385,6 @@ fn get_sample_type(sample_size_in_bits: u16) -> SampleType {
 fn get_sample_size_in_bits(sample_type: &SampleType) -> u16 {
     match sample_type {
         SampleType::U16 => 16,
+        SampleType::U32 => 32,
     }
 }
