@@ -1,226 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use core::str;
-use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-
-#[derive(Debug)]
-pub enum Chunk {
-    Riff(RiffChunk),
-    Format(FormatChunk),
-    Data(DataChunk),
-    Unknown(UnknownChunk),
-}
-
-impl Chunk {
-    pub fn get_name(&self) -> &str {
-        match self {
-            Chunk::Riff(riff) => &riff.name,
-            Chunk::Format(format) => &format.name,
-            Chunk::Data(data) => &data.name,
-            Chunk::Unknown(unknown) => &unknown.name,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct RiffChunk {
-    name: String,
-    chunk_size: u32,
-    t: String,
-}
-
-#[derive(Debug)]
-pub struct FormatChunk {
-    name: String,
-    chunk_size: u32,
-    format: u16,
-    chans: u16,
-    sample_rate: u32,
-    bytes_per_sec: u32,       // without compression: sample_rate * frame_size
-    frame_size_in_bytes: u16, // chans * ((sample_size + 7) / 8)
-    sample_size_in_bits: u16,
-}
-
-#[derive(Debug)]
-pub struct DataChunk {
-    name: String,
-    chunk_size: u32,
-    samples: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct UnknownChunk {
-    name: String,
-    chunk_size: u32,
-}
-
-pub fn read_next_chunk(file: &mut File) -> Result<Option<Chunk>> {
-    match read_chunk_header(file)? {
-        Some((chunk_id, chunk_size)) => {
-            let chunk = match &chunk_id[..] {
-                "RIFF" => read_riff_chunk(file, chunk_id, chunk_size),
-                "fmt " => read_format_chunk(file, chunk_id, chunk_size),
-                "data" => read_data_chunk(file, chunk_id, chunk_size),
-                _ => read_unknown_chunk(file, chunk_id, chunk_size),
-            }?;
-            Ok(Some(chunk))
-        }
-        None => Ok(None),
-    }
-}
-
-fn read_riff_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
-    let mut buf = [0; 4];
-    let n = file.read(&mut buf[..])?;
-    assert_eq!(4, n);
-
-    Ok(Chunk::Riff(RiffChunk {
-        name: chunk_id,
-        chunk_size,
-        t: str::from_utf8(&buf[..])?.to_owned(),
-    }))
-}
-
-fn read_format_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
-    let mut buf = [0; 16];
-    let n = file.read(&mut buf[..])?;
-    assert_eq!(16, n);
-
-    let w_format_tag = read_u16_from_buf(&buf, 0)?;
-    let w_channels = read_u16_from_buf(&buf, 2)?;
-    let dw_samples_per_sec = read_u32_from_buf(&buf, 4)?;
-    let dw_avg_bytes_per_sec = read_u32_from_buf(&buf, 8)?;
-    let w_block_align = read_u16_from_buf(&buf, 12)?;
-    let w_bits_per_sample = read_u16_from_buf(&buf, 14)?;
-
-    Ok(Chunk::Format(FormatChunk {
-        name: chunk_id,
-        chunk_size,
-        format: w_format_tag,
-        chans: w_channels,
-        sample_rate: dw_samples_per_sec,
-        bytes_per_sec: dw_avg_bytes_per_sec,
-        frame_size_in_bytes: w_block_align,
-        sample_size_in_bits: w_bits_per_sample,
-    }))
-}
-
-fn read_data_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
-    let mut buf = vec![0_u8; chunk_size as usize];
-    file.read_exact(&mut buf[..])?;
-
-    Ok(Chunk::Data(DataChunk {
-        name: chunk_id,
-        chunk_size,
-        samples: buf,
-    }))
-}
-
-fn read_unknown_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
-    file.seek(SeekFrom::Current(chunk_size as i64))?;
-    Ok(Chunk::Unknown(UnknownChunk {
-        name: chunk_id,
-        chunk_size,
-    }))
-}
-
-fn read_u32_from_buf(buf: &[u8], start: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(buf[start..start + 4].try_into()?))
-}
-
-fn read_u16_from_buf(buf: &[u8], start: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(buf[start..start + 2].try_into()?))
-}
-
-fn read_chunk_header(file: &mut File) -> Result<Option<(String, u32)>> {
-    let mut buf = [0; 8];
-    let n = file.read(&mut buf[..])?;
-
-    // EOF
-    if n == 0 {
-        return Ok(None);
-    }
-
-    assert_eq!(8, n);
-
-    let chunk_id = str::from_utf8(&buf[..4])?.to_owned();
-    let chunk_size = read_u32_from_buf(&buf, 4)?;
-
-    Ok(Some((chunk_id, chunk_size)))
-}
-
-#[derive(Debug)]
-pub enum FileType {
-    Wave,
-}
-
-fn get_file_type(file_type: &str) -> FileType {
-    match file_type {
-        "WAVE" => FileType::Wave,
-        _ => panic!("unknown file type: {}", file_type),
-    }
-}
-
-#[derive(Debug)]
-pub enum FileFormat {
-    PCM,
-}
-
-fn get_file_format(file_format: u16) -> FileFormat {
-    match file_format {
-        1 => FileFormat::PCM,
-        _ => panic!("unknown file format: {}", file_format),
-    }
-}
-
-#[derive(Debug)]
-pub enum SampleType {
-    U16,
-}
-
-fn get_sample_type(sample_size_in_bits: u16) -> SampleType {
-    match sample_size_in_bits {
-        16 => SampleType::U16,
-        _ => panic!("can't handle sample size: {}", sample_size_in_bits),
-    }
-}
-
-fn get_sample_size_in_bits(sample_type: &SampleType) -> u16 {
-    match sample_type {
-        SampleType::U16 => 16,
-    }
-}
-
-#[derive(Debug)]
-pub struct Format {
-    file_size: u32,
-    file_type: FileType,
-    file_format: FileFormat,
-    sample_type: SampleType,
-    chans: u16,
-    sample_rate: u32,
-    bytes_per_sec: u32,       // without compression: sample_rate * frame_size
-    frame_size_in_bytes: u16, // chans * ((sample_size + 7) / 8)
-    sample_size_in_bits: u16,
-}
-
-#[derive(Debug)]
-pub struct FormatCreate {
-    pub file_type: FileType,
-    pub file_format: FileFormat,
-    pub sample_type: SampleType,
-    pub chans: u16,
-    pub sample_rate: u32,
-}
-
-fn assert_riff_chunk(file: &mut File) -> Result<RiffChunk> {
-    if let Some(Chunk::Riff(riff_chunk)) = read_next_chunk(file)? {
-        Ok(riff_chunk)
-    } else {
-        Err(anyhow!("no riff chunk found"))
-    }
-}
 
 pub struct WaveFile {
     pub format: Format,
@@ -242,7 +23,11 @@ impl WaveFile {
                     format_chunk = Some(f_chunk);
                 }
                 Chunk::Data(d_chunk) => data_chunk = Some(d_chunk),
-                chunk => println!("skipping chunk: {}", chunk.get_name()),
+                chunk => println!(
+                    "skipping chunk {} wiht size {}",
+                    chunk.get_name(),
+                    chunk.get_size()
+                ),
             }
         }
 
@@ -345,5 +130,243 @@ impl WaveFile {
         assert_eq!(data_buf_chunk_size as usize, n);
 
         Ok(f)
+    }
+
+    pub fn write_to_file(&self, path: &str) -> Result<File> {
+        let format = FormatCreate {
+            file_type: self.format.file_type,
+            file_format: self.format.file_format,
+            sample_type: self.format.sample_type,
+            chans: self.format.chans,
+            sample_rate: self.format.sample_rate,
+        };
+        WaveFile::create(path, &format, &self.data)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FileFormat {
+    PCM,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FileType {
+    Wave,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SampleType {
+    U16,
+}
+
+#[derive(Debug)]
+pub struct Format {
+    file_size: u32,
+    file_type: FileType,
+    file_format: FileFormat,
+    sample_type: SampleType,
+    chans: u16,
+    sample_rate: u32,
+    bytes_per_sec: u32,       // without compression: sample_rate * frame_size
+    frame_size_in_bytes: u16, // chans * ((sample_size + 7) / 8)
+    sample_size_in_bits: u16,
+}
+
+#[derive(Debug)]
+pub struct FormatCreate {
+    pub file_type: FileType,
+    pub file_format: FileFormat,
+    pub sample_type: SampleType,
+    pub chans: u16,
+    pub sample_rate: u32,
+}
+
+#[derive(Debug)]
+pub enum Chunk {
+    Riff(RiffChunk),
+    Format(FormatChunk),
+    Data(DataChunk),
+    Unknown(UnknownChunk),
+}
+
+impl Chunk {
+    pub fn get_name(&self) -> &str {
+        match self {
+            Chunk::Riff(riff) => &riff.name,
+            Chunk::Format(format) => &format.name,
+            Chunk::Data(data) => &data.name,
+            Chunk::Unknown(unknown) => &unknown.name,
+        }
+    }
+
+    pub fn get_size(&self) -> u32 {
+        match self {
+            Chunk::Riff(riff) => riff.chunk_size,
+            Chunk::Format(format) => format.chunk_size,
+            Chunk::Data(data) => data.chunk_size,
+            Chunk::Unknown(unknown) => unknown.chunk_size,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RiffChunk {
+    name: String,
+    chunk_size: u32,
+    t: String,
+}
+
+#[derive(Debug)]
+pub struct FormatChunk {
+    name: String,
+    chunk_size: u32,
+    format: u16,
+    chans: u16,
+    sample_rate: u32,
+    bytes_per_sec: u32,       // without compression: sample_rate * frame_size
+    frame_size_in_bytes: u16, // chans * ((sample_size + 7) / 8)
+    sample_size_in_bits: u16,
+}
+
+#[derive(Debug)]
+pub struct DataChunk {
+    name: String,
+    chunk_size: u32,
+    samples: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct UnknownChunk {
+    name: String,
+    chunk_size: u32,
+}
+
+pub fn read_next_chunk(file: &mut File) -> Result<Option<Chunk>> {
+    match read_chunk_header(file)? {
+        Some((chunk_id, chunk_size)) => {
+            let chunk = match &chunk_id[..] {
+                "RIFF" => read_riff_chunk(file, chunk_id, chunk_size),
+                "fmt " => read_format_chunk(file, chunk_id, chunk_size),
+                "data" => read_data_chunk(file, chunk_id, chunk_size),
+                _ => read_unknown_chunk(file, chunk_id, chunk_size),
+            }?;
+            Ok(Some(chunk))
+        }
+        None => Ok(None),
+    }
+}
+
+fn assert_riff_chunk(file: &mut File) -> Result<RiffChunk> {
+    if let Some(Chunk::Riff(riff_chunk)) = read_next_chunk(file)? {
+        Ok(riff_chunk)
+    } else {
+        Err(anyhow!("no riff chunk found"))
+    }
+}
+
+fn read_riff_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
+    let mut buf = [0; 4];
+    let n = file.read(&mut buf[..])?;
+    assert_eq!(4, n);
+
+    Ok(Chunk::Riff(RiffChunk {
+        name: chunk_id,
+        chunk_size,
+        t: str::from_utf8(&buf[..])?.to_owned(),
+    }))
+}
+
+fn read_format_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
+    let mut buf = [0; 16];
+    let n = file.read(&mut buf[..])?;
+    assert_eq!(16, n);
+
+    let w_format_tag = read_u16_from_buf(&buf, 0)?;
+    let w_channels = read_u16_from_buf(&buf, 2)?;
+    let dw_samples_per_sec = read_u32_from_buf(&buf, 4)?;
+    let dw_avg_bytes_per_sec = read_u32_from_buf(&buf, 8)?;
+    let w_block_align = read_u16_from_buf(&buf, 12)?;
+    let w_bits_per_sample = read_u16_from_buf(&buf, 14)?;
+
+    Ok(Chunk::Format(FormatChunk {
+        name: chunk_id,
+        chunk_size,
+        format: w_format_tag,
+        chans: w_channels,
+        sample_rate: dw_samples_per_sec,
+        bytes_per_sec: dw_avg_bytes_per_sec,
+        frame_size_in_bytes: w_block_align,
+        sample_size_in_bits: w_bits_per_sample,
+    }))
+}
+
+fn read_data_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
+    let mut buf = vec![0_u8; chunk_size as usize];
+    file.read_exact(&mut buf[..])?;
+
+    Ok(Chunk::Data(DataChunk {
+        name: chunk_id,
+        chunk_size,
+        samples: buf,
+    }))
+}
+
+fn read_unknown_chunk(file: &mut File, chunk_id: String, chunk_size: u32) -> Result<Chunk> {
+    file.seek(SeekFrom::Current(chunk_size as i64))?;
+    Ok(Chunk::Unknown(UnknownChunk {
+        name: chunk_id,
+        chunk_size,
+    }))
+}
+
+fn read_u32_from_buf(buf: &[u8], start: usize) -> Result<u32> {
+    Ok(u32::from_le_bytes(buf[start..start + 4].try_into()?))
+}
+
+fn read_u16_from_buf(buf: &[u8], start: usize) -> Result<u16> {
+    Ok(u16::from_le_bytes(buf[start..start + 2].try_into()?))
+}
+
+fn read_chunk_header(file: &mut File) -> Result<Option<(String, u32)>> {
+    let mut buf = [0; 8];
+    let n = file.read(&mut buf[..])?;
+
+    // EOF
+    if n == 0 {
+        return Ok(None);
+    }
+
+    assert_eq!(8, n);
+
+    let chunk_id = str::from_utf8(&buf[..4])?.to_owned();
+    let chunk_size = read_u32_from_buf(&buf, 4)?;
+
+    Ok(Some((chunk_id, chunk_size)))
+}
+
+fn get_file_type(file_type: &str) -> FileType {
+    match file_type {
+        "WAVE" => FileType::Wave,
+        _ => panic!("unknown file type: {}", file_type),
+    }
+}
+
+fn get_file_format(file_format: u16) -> FileFormat {
+    match file_format {
+        1 => FileFormat::PCM,
+        _ => panic!("unknown file format: {}", file_format),
+    }
+}
+
+fn get_sample_type(sample_size_in_bits: u16) -> SampleType {
+    match sample_size_in_bits {
+        16 => SampleType::U16,
+        _ => panic!("can't handle sample size: {}", sample_size_in_bits),
+    }
+}
+
+fn get_sample_size_in_bits(sample_type: &SampleType) -> u16 {
+    match sample_type {
+        SampleType::U16 => 16,
     }
 }
